@@ -1,27 +1,15 @@
 from dataclasses import dataclass
 import numpy as np
 
-
-@dataclass
-class FreeAirResponse:
-    frequency: np.ndarray
-    voltage: np.ndarray
-    electrical_impedance: np.ndarray
-    mechanical_impedance: np.ndarray
-    reflected_mechanical_impedance: np.ndarray
-    input_impedance: np.ndarray
-    current: np.ndarray
-    force: np.ndarray
-    velocity: np.ndarray
-    displacement: np.ndarray
-    back_emf: np.ndarray
-
+from src.constants import AIR
+from src.responses import SystemResponse, SystemCharacteristics
 
 class LoudspeakerSystem:
-    def __init__(self, driver):
+    def __init__(self, driver, enclosure = None, medium = AIR):
         self.driver = driver
+        self.enclosure = enclosure
+        self.medium = medium
 
-    @staticmethod
     def _omega(freq):
         return 2 * np.pi * np.asarray(freq)
 
@@ -33,13 +21,51 @@ class LoudspeakerSystem:
             + 1j * w * self.driver.Le
         )
 
-    def mechanical_impedance(self, freq):
+    def driver_mechanical_impedance(self, freq):
         w = self._omega(freq)
 
         return (
             self.driver.Rms
             + 1j * w * self.driver.Mms
             + 1 / (1j * w * self.driver.Cms)
+        )
+    
+    def enclosure_mechanical_impedance(self, freq):
+        if self.enclosure is None:
+            return 0.0
+
+        Za = self.enclosure.acoustic_impedance(
+            freq,
+            self.medium
+        )
+
+        return self.driver.Sd**2 * Za
+    
+    def mechanical_impedance(self, freq):
+        return (
+            self.driver_mechanical_impedance(freq)
+            + self.enclosure_mechanical_impedance(freq)
+        )
+    
+    def characteristics(self):
+        if self.enclosure is None:
+            return SystemCharacteristics(
+                resonance_frequency=self.driver.Fs,
+                effective_compliance=self.driver.Cms,
+                mechanical_q=self.driver.Qms,
+                electrical_q=self.driver.Qes,
+                total_q=self.driver.Qts,
+            )
+
+        alpha = self.driver.Vas(self.medium) / self.enclosure.volume
+        factor = np.sqrt(1 + alpha)
+
+        return SystemCharacteristics(
+            resonance_frequency=self.driver.Fs * factor,
+            effective_compliance=self.driver.Cms / (factor**2),
+            mechanical_q=self.driver.Qms * factor,
+            electrical_q=self.driver.Qes * factor,
+            total_q=self.driver.Qts * factor,
         )
 
     def solve(self, f, voltage=1.0):
@@ -56,7 +82,7 @@ class LoudspeakerSystem:
         v = F / Zm
         x = v / (1j * omega)
 
-        return FreeAirResponse(
+        return SystemResponse(
             frequency=f,
             voltage=voltage,
             electrical_impedance=Ze,
@@ -69,3 +95,5 @@ class LoudspeakerSystem:
             displacement=x,
             back_emf=self.driver.Bl * v
         )
+    
+    

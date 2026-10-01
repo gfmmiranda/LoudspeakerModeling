@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import numpy as np
+from src.constants import AIR
 
 @dataclass
 class Driver:
@@ -14,6 +15,8 @@ class Driver:
     Cms: float  # m/N
     Sd: float   # m²
     Bl: float   # T*m = N/A
+
+    Xmax: float | None = None  # m
 
     @property
     def omega_s(self):
@@ -31,3 +34,5 @@ class Driver:
     def Fs_from_mass_compliance(self):
         return 1 / (2 * np.pi * np.sqrt(self.Mms * self.Cms))
     
+    def Vas(self, medium = AIR):
+        return medium.density * medium.speed_of_sound**2 * self.Sd**2 * self.Cms
