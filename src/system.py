@@ -2,14 +2,24 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.constants import AIR
-from src.responses import SystemResponse, SystemCharacteristics
+from src.enclosure import SealedBox
+from src.response import SystemResponse, SystemCharacteristics
 
 class LoudspeakerSystem:
-    def __init__(self, driver, enclosure = None, medium = AIR):
+    def __init__(
+            self, 
+            driver, 
+            enclosure = None,
+            radiation = None,
+            medium = AIR
+            ):
+        
         self.driver = driver
         self.enclosure = enclosure
+        self.radiation = radiation
         self.medium = medium
 
+    @staticmethod
     def _omega(freq):
         return 2 * np.pi * np.asarray(freq)
 
@@ -67,8 +77,34 @@ class LoudspeakerSystem:
             electrical_q=self.driver.Qes * factor,
             total_q=self.driver.Qts * factor,
         )
+    
+    def analytical_transfer_function(self, freq):
+        if isinstance(self.enclosure, SealedBox):
 
-    def solve(self, f, voltage=1.0):
+            chars = self.characteristics()
+
+            omega = self._omega(freq)
+            omega_c = 2 * np.pi * chars.resonance_frequency
+            Qtc = chars.total_q
+
+            s = 1j * omega
+
+            return (
+                s**2
+                /
+                (
+                    s**2
+                    + (omega_c / Qtc) * s
+                    + omega_c**2
+                )
+            )
+        
+        else:
+            raise NotImplementedError(
+                "Analytical transfer function is only implemented for sealed boxes."
+            )
+
+    def solve(self, f, voltage=1.0, distance=1.0):
         omega = 2 * np.pi * np.asarray(f)
 
         Ze = self.electrical_impedance(f)
@@ -82,6 +118,17 @@ class LoudspeakerSystem:
         v = F / Zm
         x = v / (1j * omega)
 
+        U = self.driver.Sd * v
+
+        pressure = None
+        if self.radiation is not None:
+            pressure = self.radiation.pressure(
+                freq=f,
+                volume_velocity=U,
+                distance=distance,
+                medium=self.medium
+            )
+
         return SystemResponse(
             frequency=f,
             voltage=voltage,
@@ -92,8 +139,10 @@ class LoudspeakerSystem:
             current=I,
             force=F,
             velocity=v,
+            volume_velocity=U,
             displacement=x,
-            back_emf=self.driver.Bl * v
+            back_emf=self.driver.Bl * v,
+            pressure=pressure
         )
     
     
