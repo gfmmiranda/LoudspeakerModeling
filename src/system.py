@@ -53,7 +53,6 @@ class LoudspeakerSystem:
 
         Za = self.enclosure.acoustic_impedance(
             freq=freq,
-            resonance_frequency=chars.resonance_frequency,
             medium=self.medium,
         )
 

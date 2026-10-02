@@ -15,13 +15,6 @@ def _mechanical_admittance_label(system):
         return rf"$\frac{{1}}{{{driver_impedance}}}$"
 
     box_compliance = r"\frac{S_d^2}{j\omega C_{ab}}"
-    if system.enclosure.Qa is not None:
-        box_compliance = rf"S_d^2\left(R_a+\frac{{1}}{{j\omega C_{{ab}}}}\right)"
-    if system.enclosure.Ql is not None:
-        absorption_branch = box_compliance
-        if system.enclosure.Qa is None:
-            absorption_branch = r"\frac{S_d^2}{j\omega C_{ab}}"
-        box_compliance = rf"\left(S_d^2R_l\right)\parallel\left({absorption_branch}\right)"
     return rf"$\frac{{1}}{{{driver_impedance}+{box_compliance}}}$"
 
 
