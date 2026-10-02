@@ -3,6 +3,8 @@ import numpy as np
 
 from src.constants import AIR
 from src.components.enclosure import SealedBox
+from src.components.radiation import MonopoleRadiation, BaffledCircularPiston
+
 from src.response import SystemResponse, SystemCharacteristics
 
 class LoudspeakerSystem:
@@ -104,7 +106,7 @@ class LoudspeakerSystem:
                 "Analytical transfer function is only implemented for sealed boxes."
             )
 
-    def solve(self, f, voltage=1.0, distance=1.0):
+    def solve(self, f, voltage=1.0, distance=1.0, angle=0.0):
         omega = 2 * np.pi * np.asarray(f)
 
         Ze = self.electrical_impedance(f)
@@ -121,11 +123,21 @@ class LoudspeakerSystem:
         U = self.driver.Sd * v
 
         pressure = None
-        if self.radiation is not None:
+        if isinstance(self.radiation, MonopoleRadiation):
             pressure = self.radiation.pressure(
                 freq=f,
                 volume_velocity=U,
                 distance=distance,
+                medium=self.medium
+            )
+
+        elif isinstance(self.radiation, BaffledCircularPiston):
+            pressure = self.radiation.pressure(
+                freq=f,
+                velocity=v,
+                piston_area=self.driver.Sd,
+                distance=distance,
+                angle=angle,
                 medium=self.medium
             )
 
