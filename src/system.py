@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.constants import AIR
-from src.enclosure import SealedBox
+from src.components.enclosure import SealedBox
 from src.response import SystemResponse, SystemCharacteristics
 
 class LoudspeakerSystem:
@@ -18,6 +18,11 @@ class LoudspeakerSystem:
         self.enclosure = enclosure
         self.radiation = radiation
         self.medium = medium
+
+    def block_diagram(self, output="displacement", distance=1.0):
+        from src.diagrams.diagrams import block_diagram
+
+        return block_diagram(self, output=output, distance=distance)
 
     @staticmethod
     def _omega(freq):

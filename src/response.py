@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 from src.utils import magnitude_to_db
 
@@ -38,15 +38,8 @@ class SystemResponse:
         if self.pressure is None:
             return None
 
-        idx = np.argmin(
-            np.abs(
-                self.frequency - reference_frequency
-            )
-        )
-
-        reference_pressure = np.abs(
-            self.pressure[idx]
-        )
+        idx = np.argmin(np.abs(self.frequency - reference_frequency))
+        reference_pressure = np.abs(self.pressure[idx])
 
         return magnitude_to_db(
             self.pressure,
