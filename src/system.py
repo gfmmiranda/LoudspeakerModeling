@@ -44,9 +44,12 @@ class LoudspeakerSystem:
         if self.enclosure is None:
             return 0.0
 
+        chars = self.characteristics()
+
         Za = self.enclosure.acoustic_impedance(
-            freq,
-            self.medium
+            freq=freq,
+            resonance_frequency=chars.resonance_frequency,
+            medium=self.medium,
         )
 
         return self.driver.Sd**2 * Za
@@ -77,6 +80,7 @@ class LoudspeakerSystem:
             electrical_q=self.driver.Qes * factor,
             total_q=self.driver.Qts * factor,
         )
+
     
     def analytical_transfer_function(self, freq):
         if isinstance(self.enclosure, SealedBox):
@@ -89,15 +93,7 @@ class LoudspeakerSystem:
 
             s = 1j * omega
 
-            return (
-                s**2
-                /
-                (
-                    s**2
-                    + (omega_c / Qtc) * s
-                    + omega_c**2
-                )
-            )
+            return (s**2) / ( s**2 + (omega_c / Qtc) * s + omega_c**2)
         
         else:
             raise NotImplementedError(

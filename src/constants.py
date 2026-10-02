@@ -6,6 +6,6 @@ class AcousticMedium:
     speed_of_sound: float   # m/s
 
 AIR = AcousticMedium(
-    density = 1.21,
-    speed_of_sound = 343.0
+    density = 1.20095,
+    speed_of_sound = 343.68
 )
