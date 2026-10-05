@@ -66,7 +66,7 @@ def block_diagram(system, output="displacement", distance=1.0):
         forward_blocks.append(
             TransferBlock(
                 "monopole_radiation",
-                system.radiation.pressure_transfer_label(distance),
+                system.radiation.pressure_transfer_label(),
                 "volume_velocity",
                 "pressure",
             )
