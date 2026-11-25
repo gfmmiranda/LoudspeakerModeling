@@ -21,6 +21,11 @@ class SystemResponse:
 
     pressure: np.ndarray | None = None
 
+    driver_pressure: np.ndarray | None = None
+    vent_pressure: np.ndarray | None = None
+    vent_volume_velocity: np.ndarray | None = None
+    vent_velocity: np.ndarray | None = None
+
     @property
     def spl(self):
         if self.pressure is None:
@@ -45,11 +50,3 @@ class SystemResponse:
             self.pressure,
             reference=reference_pressure
         )
-
-@dataclass
-class SystemCharacteristics:
-    resonance_frequency: float
-    effective_compliance: float
-    mechanical_q: float
-    electrical_q: float
-    total_q: float

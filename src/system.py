@@ -5,7 +5,7 @@ from src.constants import AIR
 from src.components.enclosure import SealedBox
 from src.components.radiation import MonopoleRadiation, BaffledCircularPiston
 
-from src.response import SystemResponse, SystemCharacteristics
+from src.response import SystemResponse
 
 class LoudspeakerSystem:
     def __init__(
@@ -13,12 +13,14 @@ class LoudspeakerSystem:
             driver, 
             enclosure = None,
             radiation = None,
-            medium = AIR
+            medium = AIR,
+            vent_radiation = None
             ):
         
         self.driver = driver
         self.enclosure = enclosure
         self.radiation = radiation
+        self.vent_radiation = vent_radiation if vent_radiation is not None else MonopoleRadiation()
         self.medium = medium
 
     def block_diagram(self, output="displacement", distance=1.0):
@@ -51,8 +53,6 @@ class LoudspeakerSystem:
         if self.enclosure is None:
             return 0.0
 
-        chars = self.characteristics()
-
         Za = self.enclosure.acoustic_impedance(
             freq=freq,
             medium=self.medium,
@@ -66,36 +66,46 @@ class LoudspeakerSystem:
             + self.enclosure_mechanical_impedance(freq)
         )
     
-    def characteristics(self):
+    @property
+    def _loading_factor(self):
         if self.enclosure is None:
-            return SystemCharacteristics(
-                resonance_frequency=self.driver.Fs,
-                effective_compliance=self.driver.Cms,
-                mechanical_q=self.driver.Qms,
-                electrical_q=self.driver.Qes,
-                total_q=self.driver.Qts,
-            )
+            return 1.0
 
-        alpha = self.driver.Vas(self.medium) / self.enclosure.volume
-        factor = np.sqrt(1 + alpha)
+        if isinstance(self.enclosure, SealedBox):
+            alpha = self.driver.Vas(self.medium) / self.enclosure.volume
+            return np.sqrt(1 + alpha)
 
-        return SystemCharacteristics(
-            resonance_frequency=self.driver.Fs * factor,
-            effective_compliance=self.driver.Cms / (factor**2),
-            mechanical_q=self.driver.Qms * factor,
-            electrical_q=self.driver.Qes * factor,
-            total_q=self.driver.Qts * factor,
+        raise NotImplementedError(
+            "Loaded resonance and Q are only defined for free-air and sealed boxes."
         )
+
+    @property
+    def resonance_frequency(self):
+        return self.driver.Fs * self._loading_factor
+
+    @property
+    def effective_compliance(self):
+        return self.driver.Cms / self._loading_factor**2
+
+    @property
+    def mechanical_q(self):
+        return self.driver.Qms * self._loading_factor
+
+    @property
+    def electrical_q(self):
+        return self.driver.Qes * self._loading_factor
+
+    @property
+    def total_q(self):
+        return self.driver.Qts * self._loading_factor
 
     
     def analytical_transfer_function(self, freq):
         if isinstance(self.enclosure, SealedBox):
 
-            chars = self.characteristics()
-
             omega = self._omega(freq)
-            omega_c = 2 * np.pi * chars.resonance_frequency
-            Qtc = chars.total_q
+            omega_c = 2 * np.pi * self.resonance_frequency
+            Qtc = self.total_q
 
             s = 1j * omega
 
@@ -122,9 +132,9 @@ class LoudspeakerSystem:
 
         U = self.driver.Sd * v
 
-        pressure = None
+        driver_pressure = None
         if isinstance(self.radiation, MonopoleRadiation):
-            pressure = self.radiation.pressure(
+            driver_pressure = self.radiation.pressure(
                 freq=f,
                 volume_velocity=U,
                 distance=distance,
@@ -132,7 +142,7 @@ class LoudspeakerSystem:
             )
 
         elif isinstance(self.radiation, BaffledCircularPiston):
-            pressure = self.radiation.pressure(
+            driver_pressure = self.radiation.pressure(
                 freq=f,
                 velocity=v,
                 piston_area=self.driver.Sd,
@@ -140,6 +150,28 @@ class LoudspeakerSystem:
                 angle=angle,
                 medium=self.medium
             )
+
+        vent_volume_velocity = None
+        vent_velocity = None
+        vent_pressure = None
+        pressure = driver_pressure
+
+        if hasattr(self.enclosure, "vent_volume_velocity"):
+            vent_volume_velocity = self.enclosure.vent_volume_velocity(
+                freq=f,
+                driver_volume_velocity=U,
+                medium=self.medium,
+            )
+            vent_velocity = vent_volume_velocity / self.enclosure.vent_area
+
+            if driver_pressure is not None:
+                vent_pressure = self.vent_radiation.pressure(
+                    freq=f,
+                    volume_velocity=vent_volume_velocity,
+                    distance=distance,
+                    medium=self.medium,
+                )
+                pressure = driver_pressure + vent_pressure
 
         return SystemResponse(
             frequency=f,
@@ -154,7 +186,11 @@ class LoudspeakerSystem:
             volume_velocity=U,
             displacement=x,
             back_emf=self.driver.Bl * v,
-            pressure=pressure
+            pressure=pressure,
+            driver_pressure=driver_pressure,
+            vent_pressure=vent_pressure,
+            vent_volume_velocity=vent_volume_velocity,
+            vent_velocity=vent_velocity,
         )
     
     

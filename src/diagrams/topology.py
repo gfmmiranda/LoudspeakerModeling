@@ -16,6 +16,7 @@ class TransferBlock:
     label: str
     input_signal: str
     output_signal: str
+    width: float | None = None
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,14 @@ class SummingJunction:
 
 
 @dataclass(frozen=True)
+class ParallelBranch:
+    # Path tapped from a forward signal and merged back by a second summing junction.
+    tap_signal: str
+    blocks: tuple[TransferBlock, ...]
+    merge: SummingJunction
+
+
+@dataclass(frozen=True)
 class BlockDiagramRepresentation:
     signals: tuple[Signal, ...]
     forward_blocks: tuple[TransferBlock, ...]
@@ -39,6 +48,7 @@ class BlockDiagramRepresentation:
     summing_junction: SummingJunction
     input_id: str
     output_id: str
+    branch: ParallelBranch | None = None
 
     def signal(self, signal_id: str) -> Signal:
         return next(signal for signal in self.signals if signal.id == signal_id)
