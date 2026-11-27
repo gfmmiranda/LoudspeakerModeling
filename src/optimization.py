@@ -1,26 +1,66 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.optimize import minimize_scalar
+from scipy.optimize import minimize
 
 from src.constants import AIR
-from src.components.enclosure import SealedBox, VentedBox
+from src.components.enclosure import VentedBox
 from src.components.radiation import MonopoleRadiation
 from src.system import LoudspeakerSystem
 from src.utils import magnitude_to_db
 
 P_REF = 20e-6
 
-# Phasors are treated as RMS, while Xmax is a peak value.
-RMS_FROM_PEAK = 1 / np.sqrt(2)
+# Phasors are RMS, while Xmax and the vent speed limit are peak values.
+PEAK_FROM_RMS = np.sqrt(2)
+
+FEASIBILITY_TOL = 1e-6
+
+F3_DROP_DB = 3.0
 
 
-@dataclass(frozen=True)
-class DesignLimits:
-    vent_velocity: float = 15.0      # m/s, peak vent air speed on the max-SPL drive curve
-    max_vent_length: float = 0.40    # m, physical length T
-    min_vent_radius: float = 0.015   # m
-    max_voltage: float | None = None # V RMS drive cap; None keeps only the thermal limit
+@dataclass
+class Requirements:
+    """Constraints of the design problem, evaluated at every frequency in `freqs` while the
+    system is driven at `voltage`."""
+
+    freqs: np.ndarray
+    voltage: float                    # V RMS at the source, before any high-pass
+    max_f3: float                     # Hz, of the whole system including any high-pass
+    max_vent_speed: float = 17.0      # m/s, peak air speed in the vent
+    min_vent_radius: float = 0.015    # m
+    max_vent_length: float = 0.40     # m, physical length T
+    Ql: float = 7.0
+    Qp: float | None = None
+
+    def __post_init__(self):
+        # The f3 constraint must be checked at max_f3 itself, not only at the next grid point.
+        self.freqs = np.union1d(self.freqs, self.max_f3)
+
+
+@dataclass
+class Performance:
+    """Response at the drive voltage, per frequency."""
+
+    excursion: np.ndarray      # m, peak
+    vent_flow: np.ndarray      # m^3/s, peak
+    level: np.ndarray          # dB re the passband (mass-controlled) asymptote
+
+
+@dataclass
+class Design:
+    volume: float              # m^3
+    fb: float                  # Hz
+    vent_radius: float         # m
+    vent_length: float         # m, physical length T
+    margins: dict = field(repr=False)
+
+    @property
+    def feasible(self):
+        return is_feasible(self.margins)
+
+    def box(self, req):
+        return VentedBox(self.volume, self.vent_radius, self.vent_length, Ql=req.Ql, Qp=req.Qp)
 
 
 @dataclass
@@ -29,37 +69,14 @@ class MaxSPLCurve:
     spl: np.ndarray                      # dB re 20 µPa, lower of the two limits
     spl_excursion_limited: np.ndarray
     spl_voltage_limited: np.ndarray      # thermal limit, or the drive cap if lower
-    spl_per_volt: np.ndarray             # small-signal SPL at 1 V RMS
-    voltage: np.ndarray                  # V RMS on the max-SPL curve
-    vent_volume_velocity: np.ndarray | None  # |Qv| on the max-SPL curve
-
-
-@dataclass
-class VentSizing:
-    vent_radius: float
-    vent_length: float
-    feasible: bool
-
-
-@dataclass
-class Design:
-    volume: float
-    fb: float
-    curve: MaxSPLCurve
-    error: float
-    f3: float
-    vent: VentSizing
-
-    @property
-    def feasible(self):
-        return self.vent.feasible
+    voltage: np.ndarray                  # V RMS
 
 
 def make_grid(f_min=10.0, f_max=1000.0, n=300):
     return np.geomspace(f_min, f_max, n)
 
 
-def vented_system(driver, volume, fb, *, Ql=7.0, Qp=None, medium=AIR):
+def vented_system(driver, volume, fb, *, Ql=7.0, Qp=None, highpass=None, medium=AIR):
     # The response depends on (volume, fb) only: Map and Cab do not depend on the vent area at fixed fb.
     radius = 0.03
     area = np.pi * radius**2
@@ -73,164 +90,160 @@ def vented_system(driver, volume, fb, *, Ql=7.0, Qp=None, medium=AIR):
         Ql=Ql,
         Qp=Qp,
     )
-    return LoudspeakerSystem(driver, box, radiation=MonopoleRadiation(), medium=medium)
+    return LoudspeakerSystem(driver, box, radiation=MonopoleRadiation(), medium=medium, highpass=highpass)
 
 
-def sealed_system(driver, volume, medium=AIR):
-    return LoudspeakerSystem(driver, SealedBox(volume), radiation=MonopoleRadiation(), medium=medium)
+def vent_length(volume, fb, radius, medium=AIR):
+    """Physical length of a flanged vent of the given radius that tunes the box to fb."""
+    area = np.pi * radius**2
+    effective_length = medium.speed_of_sound**2 * area / ((2 * np.pi * fb)**2 * volume)
+    return effective_length - 8 * radius / (3 * np.pi)
+
+
+def performance(system, req):
+    """Peak excursion, peak vent flow and level relative to the unfiltered passband at req.voltage."""
+    response = system.solve(req.freqs, voltage=req.voltage)
+    driver = system.driver
+
+    # Mass-controlled asymptote of a monopole into half space, including the Le roll-off.
+    passband = (
+        system.medium.density * driver.Bl * driver.Sd * req.voltage
+        / (2 * np.pi * driver.Mms * np.abs(response.electrical_impedance))
+    )
+
+    return Performance(
+        excursion=PEAK_FROM_RMS * np.abs(response.displacement),
+        vent_flow=PEAK_FROM_RMS * np.abs(response.vent_volume_velocity),
+        level=magnitude_to_db(response.pressure, passband),
+    )
+
+
+def f3(freqs, level):
+    """Lowest frequency above which `level` stays within F3_DROP_DB of the passband."""
+    below = np.flatnonzero(level < -F3_DROP_DB)
+    if below.size == 0:
+        return float(freqs[0])
+    i = below[-1]
+    if i == len(freqs) - 1:
+        return np.nan
+    return float(np.interp(-F3_DROP_DB, level[i:i + 2], freqs[i:i + 2]))
+
+
+def shortest_vent_radius(volume, fb, peak_vent_flow, req, medium=AIR):
+    """Smallest radius meeting the radius limit, the speed limit and T >= 0.
+
+    T(a) = c^2 pi a^2 / (wb^2 V) - 8a / (3 pi) increases for a above its root, so this is also
+    the radius of the shortest vent."""
+    omega_b = 2 * np.pi * fb
+    speed_radius = np.sqrt(peak_vent_flow / (np.pi * req.max_vent_speed))
+    zero_length_radius = 8 * omega_b**2 * volume / (3 * np.pi**2 * medium.speed_of_sound**2)
+    return float(max(req.min_vent_radius, speed_radius, zero_length_radius))
+
+
+def evaluate(driver, req, volume, fb, highpass=None, medium=AIR):
+    """Design at (volume, fb) with the shortest admissible vent, and its constraint margins.
+
+    A constraint holds where its margin is >= 0."""
+    system = vented_system(driver, volume, fb, Ql=req.Ql, Qp=req.Qp, highpass=highpass, medium=medium)
+    perf = performance(system, req)
+
+    radius = shortest_vent_radius(volume, fb, perf.vent_flow.max(), req, medium)
+    length = vent_length(volume, fb, radius, medium)
+
+    margins = {
+        "excursion": 1 - perf.excursion / driver.Xmax,
+        "f3": perf.level[req.freqs >= req.max_f3] / F3_DROP_DB + 1,
+        "vent_length": np.atleast_1d(1 - length / req.max_vent_length),
+    }
+
+    return Design(
+        volume=float(volume),
+        fb=float(fb),
+        vent_radius=radius,
+        vent_length=float(length),
+        margins=margins,
+    )
+
+
+def is_feasible(margins):
+    return all(np.min(m) >= -FEASIBILITY_TOL for m in margins.values())
+
+
+def design_vented_box(
+    driver,
+    req,
+    *,
+    highpass=None,
+    volume_bounds=(1e-3, 0.2),
+    fb_bounds=(10.0, 150.0),
+    starts=None,
+    medium=AIR,
+):
+    """Smallest vented box that meets every constraint in `req`, with an optional fixed high-pass
+    filter on the drive.
+
+        minimise    V
+        over        V, fb       (a_v = shortest_vent_radius(V, fb))
+        subject to  peak cone excursion <= Xmax, at every frequency
+                    level >= -3 dB re passband, at every frequency >= max_f3
+                    T(V, fb, a_v) <= max_vent_length
+
+    The vent speed, minimum radius and T >= 0 hold by construction of a_v. The problem is not
+    convex, so SLSQP runs from several (volume, fb) starts and the smallest feasible result is
+    kept. Returns None if no start ends feasible.
+    """
+    scale = np.array([1e-3, 1.0])    # the optimiser works in L and Hz
+    bounds = [(volume_bounds[0] / scale[0], volume_bounds[1] / scale[0]), fb_bounds]
+
+    def constraints(z):
+        return np.concatenate(list(evaluate(driver, req, *(z * scale), highpass, medium).margins.values()))
+
+    if starts is None:
+        starts = [
+            (volume, fb)
+            for volume in np.geomspace(5e-3, 80e-3, 4)
+            for fb in np.array([0.6, 0.9, 1.2]) * req.max_f3
+        ]
+
+    best = None
+    for start in starts:
+        result = minimize(
+            lambda z: z[0],
+            np.asarray(start) / scale,
+            jac=lambda z: np.array([1.0, 0.0]),
+            bounds=bounds,
+            constraints=[{"type": "ineq", "fun": constraints}],
+            method="SLSQP",
+            options={"maxiter": 200, "ftol": 1e-10, "eps": 1e-6},
+        )
+
+        design = evaluate(driver, req, *(result.x * scale), highpass, medium)
+        if design.feasible and (best is None or design.volume < best.volume):
+            best = design
+
+    return best
 
 
 def max_spl_curve(system, freqs, distance=1.0, max_voltage=None):
+    """Loudest SPL at each frequency before the cone reaches Xmax or the drive hits the thermal limit
+    (or the optional voltage cap, if lower)."""
     driver = system.driver
-
-    # The model is linear, so one 1 V solve gives every drive level.
     response = system.solve(freqs, voltage=1.0, distance=distance)
-    pressure = np.abs(response.pressure)
-    excursion = np.abs(response.displacement)
+    # The limits apply at the terminals, so work per terminal volt; a line-level high-pass
+    # then leaves the curve unchanged.
+    gain = np.abs(response.voltage)
+    pressure = np.abs(response.pressure) / gain
 
-    v_excursion = RMS_FROM_PEAK * driver.Xmax / excursion
+    v_excursion = driver.Xmax / (PEAK_FROM_RMS * np.abs(response.displacement) / gain)
     v_limit = np.sqrt(driver.Pe * driver.Re) if driver.Pe is not None else np.inf
     if max_voltage is not None:
         v_limit = min(v_limit, max_voltage)
     voltage = np.minimum(v_excursion, v_limit)
-
-    vent_flow = None
-    if response.vent_volume_velocity is not None:
-        vent_flow = np.abs(response.vent_volume_velocity) * voltage
 
     return MaxSPLCurve(
         frequency=np.asarray(freqs),
         spl=magnitude_to_db(pressure * voltage, P_REF),
         spl_excursion_limited=magnitude_to_db(pressure * v_excursion, P_REF),
         spl_voltage_limited=magnitude_to_db(pressure * v_limit * np.ones_like(pressure), P_REF),
-        spl_per_volt=magnitude_to_db(pressure, P_REF),
         voltage=voltage,
-        vent_volume_velocity=vent_flow,
     )
-
-
-def f3_frequency(freqs, spl, ref_band=(100.0, 200.0)):
-    """Highest frequency below ref_band where spl falls 3 dB under its mean level in ref_band."""
-    freqs = np.asarray(freqs)
-    spl = np.asarray(spl)
-    in_ref = (freqs >= ref_band[0]) & (freqs <= ref_band[1])
-    threshold = np.mean(spl[in_ref]) - 3.0
-
-    for i in np.where(freqs < ref_band[0])[0][::-1]:
-        if spl[i] < threshold:
-            fraction = (threshold - spl[i]) / (spl[i + 1] - spl[i])
-            log_f = np.log10(freqs[i]) + fraction * (np.log10(freqs[i + 1]) - np.log10(freqs[i]))
-            return float(10**log_f)
-
-    return float(freqs[0])
-
-
-def spl_error(spl, reference_db, mode="shape"):
-    """RMS dB error. 'shape' removes the mean level, 'level' compares directly,
-    'shortfall' only counts SPL below the reference."""
-    difference = np.asarray(spl) - np.asarray(reference_db)
-
-    if mode == "shape":
-        difference = difference - difference.mean()
-    elif mode == "shortfall":
-        difference = np.minimum(difference, 0.0)
-    elif mode != "level":
-        raise ValueError("mode must be 'shape', 'level' or 'shortfall'")
-
-    return float(np.sqrt(np.mean(difference**2)))
-
-
-def size_vent(volume, fb, vent_flow, limits=DesignLimits(), medium=AIR):
-    # Qv does not depend on the vent area, so the speed limit gives the minimum area directly.
-    area = max(np.max(vent_flow) / limits.vent_velocity, np.pi * limits.min_vent_radius**2)
-    radius = np.sqrt(area / np.pi)
-
-    effective_length = medium.speed_of_sound**2 * area / ((2 * np.pi * fb)**2 * volume)
-    length = effective_length - 8 * radius / (3 * np.pi)
-
-    return VentSizing(
-        vent_radius=float(radius),
-        vent_length=float(length),
-        feasible=bool(0.0 < length <= limits.max_vent_length),
-    )
-
-
-def evaluate_design(
-    driver,
-    volume,
-    fb,
-    *,
-    freqs,
-    band,
-    reference_db,
-    mode="shape",
-    limits=DesignLimits(),
-    Ql=7.0,
-    Qp=None,
-    distance=1.0,
-    medium=AIR,
-    f3_ref_band=(100.0, 200.0),
-):
-    system = vented_system(driver, volume, fb, Ql=Ql, Qp=Qp, medium=medium)
-    curve = max_spl_curve(system, freqs, distance, max_voltage=limits.max_voltage)
-
-    in_band = (freqs >= band[0]) & (freqs <= band[1])
-    reference = np.broadcast_to(np.asarray(reference_db, dtype=float), freqs.shape)
-
-    return Design(
-        volume=volume,
-        fb=fb,
-        curve=curve,
-        error=spl_error(curve.spl[in_band], reference[in_band], mode),
-        f3=f3_frequency(freqs, curve.spl_per_volt, f3_ref_band),
-        vent=size_vent(volume, fb, curve.vent_volume_velocity, limits, medium),
-    )
-
-
-def best_tuning(driver, volume, *, fb_bounds=(20.0, 80.0), n_grid=41, max_f3=None, **kwargs):
-    """Best feasible fb for a fixed volume, or None if no tuning is feasible."""
-
-    def admissible(design):
-        return design.feasible and (max_f3 is None or design.f3 <= max_f3)
-
-    fbs = np.geomspace(*fb_bounds, n_grid)
-    designs = [evaluate_design(driver, volume, fb, **kwargs) for fb in fbs]
-    scores = np.array([d.error if admissible(d) else np.inf for d in designs])
-
-    if not np.isfinite(scores).any():
-        return None
-
-    index = int(np.argmin(scores))
-    best = designs[index]
-
-    def penalised(fb):
-        design = evaluate_design(driver, volume, fb, **kwargs)
-        return design.error if admissible(design) else 1e3
-
-    bracket = (fbs[max(index - 1, 0)], fbs[min(index + 1, n_grid - 1)])
-    refined = minimize_scalar(penalised, bounds=bracket, method="bounded", options={"xatol": 1e-3})
-    candidate = evaluate_design(driver, volume, float(refined.x), **kwargs)
-
-    if admissible(candidate) and candidate.error < best.error:
-        best = candidate
-
-    return best
-
-
-def volume_sweep(driver, volumes, **kwargs):
-    return [best_tuning(driver, volume, **kwargs) for volume in volumes]
-
-
-def error_grid(driver, volumes, fbs, **kwargs):
-    error = np.empty((len(volumes), len(fbs)))
-    f3 = np.empty((len(volumes), len(fbs)))
-    feasible = np.empty((len(volumes), len(fbs)), dtype=bool)
-
-    for i, volume in enumerate(volumes):
-        for j, fb in enumerate(fbs):
-            design = evaluate_design(driver, volume, fb, **kwargs)
-            error[i, j] = design.error
-            f3[i, j] = design.f3
-            feasible[i, j] = design.feasible
-
-    return error, feasible, f3

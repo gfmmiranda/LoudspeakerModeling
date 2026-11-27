@@ -26,6 +26,8 @@ class SystemResponse:
     vent_volume_velocity: np.ndarray | None = None
     vent_velocity: np.ndarray | None = None
 
+    source_voltage: np.ndarray | None = None   # before the high-pass; `voltage` is at the terminals
+
     @property
     def spl(self):
         if self.pressure is None:

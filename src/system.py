@@ -14,7 +14,8 @@ class LoudspeakerSystem:
             enclosure = None,
             radiation = None,
             medium = AIR,
-            vent_radiation = None
+            vent_radiation = None,
+            highpass = None,
             ):
         
         self.driver = driver
@@ -22,6 +23,7 @@ class LoudspeakerSystem:
         self.radiation = radiation
         self.vent_radiation = vent_radiation if vent_radiation is not None else MonopoleRadiation()
         self.medium = medium
+        self.highpass = highpass
 
     def block_diagram(self, output="displacement", distance=1.0):
         from src.diagrams.diagrams import block_diagram
@@ -119,6 +121,10 @@ class LoudspeakerSystem:
     def solve(self, f, voltage=1.0, distance=1.0, angle=0.0):
         omega = 2 * np.pi * np.asarray(f)
 
+        source_voltage = voltage
+        if self.highpass is not None:
+            voltage = voltage * self.highpass.transfer(f)
+
         Ze = self.electrical_impedance(f)
         Zm = self.mechanical_impedance(f)
 
@@ -191,6 +197,7 @@ class LoudspeakerSystem:
             vent_pressure=vent_pressure,
             vent_volume_velocity=vent_volume_velocity,
             vent_velocity=vent_velocity,
+            source_voltage=source_voltage,
         )
     
     

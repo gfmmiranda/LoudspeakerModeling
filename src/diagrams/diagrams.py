@@ -20,7 +20,7 @@ def _mechanical_admittance_label(system):
         return rf"$\frac{{1}}{{{driver_impedance}}}$"
 
     if _has_vent(system):
-        box_load = r"S_d^2 Z_{load}"
+        box_load = r"S_d^2 Z_a"
     else:
         box_load = r"\frac{S_d^2}{j\omega C_{ab}}"
     return rf"$\frac{{1}}{{{driver_impedance}+{box_load}}}$"
@@ -54,7 +54,7 @@ def block_diagram(system, output="displacement", distance=1.0):
             _mechanical_admittance_label(system),
             "force",
             "velocity",
-            width=6.2 if _has_vent(system) else None,
+            width=5.0 if _has_vent(system) else None,
         ),
     ]
 
@@ -101,7 +101,7 @@ def block_diagram(system, output="displacement", distance=1.0):
                 blocks=(
                     TransferBlock(
                         "vent_flow",
-                        r"$-\frac{Z_{load}}{Z_{ap}}$",
+                        r"$-\frac{Z_{ab}}{Z_{av}}$",
                         "volume_velocity",
                         "vent_volume_velocity",
                     ),
